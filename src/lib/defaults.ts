@@ -1,5 +1,7 @@
 import type { Account, Category } from '../types/finance';
 
+export const CURRENT_SEED_VERSION = 2;
+
 export function generateUUID(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -11,16 +13,50 @@ export function generateUUID(): string {
   });
 }
 
+// Tailored icon & color lookup for known "Budget e finanze" categories
+export function inferCategoryAppearance(
+  kind: 'expense' | 'income',
+  rawName: string
+): { icon: string; color: string } {
+  const key = rawName.trim().toLowerCase();
+
+  const map: Record<string, { icon: string; color: string }> = {
+    alimentari: { icon: 'shopping-cart', color: '#3b82f6' },
+    trasporti: { icon: 'bus', color: '#06b6d4' },
+    svago: { icon: 'gamepad', color: '#ec4899' },
+    bet: { icon: 'trophy', color: '#f59e0b' },
+    'matched betting': { icon: 'trending-up', color: '#8b5cf6' },
+    regali: { icon: 'gift', color: '#ef4444' },
+    regalo: { icon: 'gift', color: '#ef4444' },
+    vinted: { icon: 'shirt', color: '#14b8a6' },
+    istruzione: { icon: 'graduation', color: '#6366f1' },
+    souvenir: { icon: 'plane', color: '#f97316' },
+    stipendio: { icon: 'briefcase', color: '#10b981' },
+    'xiaomi macchinetta': { icon: 'coffee', color: '#f97316' },
+    nonna: { icon: 'heart', color: '#ec4899' },
+    rimborsi: { icon: 'receipt', color: '#06b6d4' },
+    bottiglie: { icon: 'coins', color: '#84cc16' },
+    interessi: { icon: 'landmark', color: '#3b82f6' },
+    altro: { icon: 'other', color: '#64748b' },
+  };
+
+  if (map[key]) return map[key];
+  return {
+    icon: kind === 'expense' ? 'tag' : 'coins',
+    color: kind === 'expense' ? '#3b82f6' : '#10b981',
+  };
+}
+
 export function createInitialSeedData(): {
   accounts: Account[];
   categories: Category[];
 } {
   const now = new Date().toISOString();
 
-  // Single default account as requested by user ("Per ora uso un solo conto")
+  // Single default account matching "Budget e finanze.xlsx" ("Principale")
   const mainAccount: Account = {
     id: generateUUID(),
-    name: 'Conto Principale',
+    name: 'Principale',
     type: 'bank',
     icon: 'landmark',
     color: '#10b981',
@@ -77,52 +113,31 @@ export function createInitialSeedData(): {
     });
   };
 
-  // Expense categories & subcategories
-  addCat('expense', 'Alimentari & Spesa', 'shopping-cart', '#3b82f6', [
-    'Supermercato',
-    'Mercato & Forno',
-  ]);
-  addCat('expense', 'Ristoranti & Bar', 'utensils', '#f59e0b', [
-    'Ristorante / Pizzeria',
-    'Bar & Colazione',
-    'Delivery & Asporto',
-  ]);
-  addCat('expense', 'Casa & Utenze', 'home', '#10b981', [
-    'Affitto / Mutuo',
-    'Luce & Gas',
-    'Internet & Telefono',
-    'Manutenzione Casa',
-  ]);
-  addCat('expense', 'Trasporti & Auto', 'car', '#06b6d4', [
-    'Carburante',
-    'Mezzi Pubblici',
-    'Parcheggi & Pedaggi',
-    'Assicurazione & Bollo',
-  ]);
-  addCat('expense', 'Shopping', 'shopping-bag', '#8b5cf6', [
-    'Abbigliamento',
-    'Elettronica',
-    'Regali',
-  ]);
-  addCat('expense', 'Salute & Cura', 'heart-pulse', '#ef4444', [
-    'Farmacia & Visite',
-    'Palestra & Sport',
-    'Cura Persona',
-  ]);
-  addCat('expense', 'Svago & Abbonamenti', 'film', '#ec4899', [
-    'Abbonamenti Digitali',
-    'Uscite & Eventi',
-    'Viaggi & Vacanze',
-    'Hobby',
-  ]);
-  addCat('expense', 'Altre Spese', 'other', '#64748b', []);
+  // Exact Expense categories from "Budget e finanze.xlsx"
+  addCat('expense', 'Alimentari', 'shopping-cart', '#3b82f6');
+  addCat('expense', 'Trasporti', 'bus', '#06b6d4');
+  addCat('expense', 'Svago', 'gamepad', '#ec4899');
+  addCat('expense', 'Bet', 'trophy', '#f59e0b');
+  addCat('expense', 'Matched betting', 'trending-up', '#8b5cf6');
+  addCat('expense', 'Regali', 'gift', '#ef4444');
+  addCat('expense', 'Vinted', 'shirt', '#14b8a6');
+  addCat('expense', 'Istruzione', 'graduation', '#6366f1');
+  addCat('expense', 'Souvenir', 'plane', '#f97316');
+  addCat('expense', 'Altro', 'other', '#64748b');
 
-  // Income categories
+  // Exact Income categories from "Budget e finanze.xlsx"
   sortIdx = 0;
-  addCat('income', 'Stipendio', 'briefcase', '#10b981', []);
-  addCat('income', 'Entrate Extra', 'coins', '#3b82f6', []);
-  addCat('income', 'Rimborsi', 'receipt', '#06b6d4', []);
-  addCat('income', 'Regali & Altro', 'gift', '#f59e0b', []);
+  addCat('income', 'Stipendio', 'briefcase', '#10b981');
+  addCat('income', 'Bet', 'trophy', '#f59e0b');
+  addCat('income', 'Xiaomi macchinetta', 'coffee', '#f97316');
+  addCat('income', 'Nonna', 'heart', '#ec4899');
+  addCat('income', 'Regalo', 'gift', '#ef4444');
+  addCat('income', 'Vinted', 'shirt', '#14b8a6');
+  addCat('income', 'Matched betting', 'trending-up', '#8b5cf6');
+  addCat('income', 'Rimborsi', 'receipt', '#06b6d4');
+  addCat('income', 'Bottiglie', 'coins', '#84cc16');
+  addCat('income', 'Interessi', 'landmark', '#3b82f6');
+  addCat('income', 'Altro', 'other', '#64748b');
 
   return {
     accounts: [mainAccount],

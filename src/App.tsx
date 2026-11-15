@@ -112,6 +112,7 @@ function SikiBudgetShell() {
             onChangeFlowTab={setFlowTab}
             onOpenNewTransaction={openNewTransaction}
             onEditTransaction={openEditTransaction}
+            onNavigate={setCurrentView}
           />
         )}
         {currentView === 'operations' && (

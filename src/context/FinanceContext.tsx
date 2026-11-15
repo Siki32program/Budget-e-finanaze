@@ -9,7 +9,12 @@ import React, {
 } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { db, loadLocalSettings, queueOutbox, saveLocalSettings } from '../lib/db';
-import { createInitialSeedData, generateUUID } from '../lib/defaults';
+import {
+  CURRENT_SEED_VERSION,
+  createInitialSeedData,
+  generateUUID,
+  inferCategoryAppearance,
+} from '../lib/defaults';
 import { advanceRecurringDate, todayISO } from '../lib/format';
 import { supabase } from '../lib/supabase';
 import { runCloudSync } from '../lib/sync';
@@ -130,7 +135,10 @@ interface FinanceContextValue {
   applyRecurringRuleNow: (ruleId: string) => Promise<void>;
   skipRecurringRuleOnce: (ruleId: string) => Promise<void>;
   deleteRecurringRule: (id: string) => Promise<void>;
-  importTransactionsBatch: (rows: ImportedTransactionRow[]) => Promise<{ imported: number }>;
+  importTransactionsBatch: (
+    rows: ImportedTransactionRow[],
+    options?: { deduplicate?: boolean }
+  ) => Promise<{ imported: number; skipped: number }>;
   exportBackupJSON: () => Promise<string>;
   restoreBackupJSON: (jsonText: string) => Promise<{ ok: boolean; error?: string }>;
 }
@@ -289,16 +297,32 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
 
     (async () => {
-      const existingAccCount = await db.accounts.count();
+      const [existingAccCount, existingTxCount] = await Promise.all([
+        db.accounts.count(),
+        db.transactions.count(),
+      ]);
       const localSet = loadLocalSettings();
 
-      if (existingAccCount === 0 && localSet.seededVersion === 0) {
+      const shouldReseedUntouched =
+        localSet.seededVersion < CURRENT_SEED_VERSION &&
+        !localSet.hasUserModifiedData &&
+        existingTxCount === 0 &&
+        !localSet.lastSyncedAt;
+
+      if (existingAccCount === 0 || shouldReseedUntouched) {
         const seed = createInitialSeedData();
         await db.transaction('rw', [db.accounts, db.categories], async () => {
+          if (shouldReseedUntouched) {
+            await db.accounts.clear();
+            await db.categories.clear();
+          }
           await db.accounts.bulkPut(seed.accounts);
           await db.categories.bulkPut(seed.categories);
         });
-        const nextSet: AppSettings = { ...localSet, seededVersion: 1 };
+        const nextSet: AppSettings = {
+          ...localSet,
+          seededVersion: CURRENT_SEED_VERSION,
+        };
         saveLocalSettings(nextSet);
         if (mounted) setSettings(nextSet);
       }
@@ -476,7 +500,7 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
       if (error) return { ok: false, error: error.message };
       setCloudUser(data.user ?? null);
       if (data.session) {
-        await triggerSync(true);
+        await triggerSync();
       }
       return { ok: true };
     },
@@ -832,15 +856,32 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
     [markUserModified, reloadFromIndexedDB, scheduleBackgroundSync]
   );
 
-  // Batch Import (for 2026 Excel / CSV import!)
+  // Batch Import (100% compatible with "Budget e finanze.xlsx" & generic Excel/CSV)
   const importTransactionsBatch = useCallback(
-    async (rows: ImportedTransactionRow[]) => {
-      const now = new Date().toISOString();
+    async (rows: ImportedTransactionRow[], options?: { deduplicate?: boolean }) => {
+      const deduplicate = options?.deduplicate !== false;
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
       const accList = [...activeAccounts];
       const defaultAcc = accList.find((a) => a.isDefault) || accList[0];
       if (!defaultAcc) throw new Error('Nessun conto disponibile.');
 
       const catList = [...allCategories];
+      const catById = new Map(catList.map((c) => [c.id, c]));
+
+      // Build multiset of existing transaction signatures for optional deduplication
+      const existingCounts = new Map<string, number>();
+      if (deduplicate) {
+        for (const tx of allTransactions) {
+          const catName = tx.categoryId
+            ? (catById.get(tx.categoryId)?.name ?? '').trim().toLowerCase()
+            : '';
+          const sig = `${tx.kind}|${tx.occurredOn}|${tx.amountCents}|${catName}|${tx.note
+            .trim()
+            .toLowerCase()}`;
+          existingCounts.set(sig, (existingCounts.get(sig) ?? 0) + 1);
+        }
+      }
 
       const findOrCreateAccount = async (rawName?: string): Promise<Account> => {
         const trimmed = (rawName ?? '').trim();
@@ -853,8 +894,8 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
           id: generateUUID(),
           name: trimmed,
           type: 'bank',
-          icon: 'wallet',
-          color: '#3b82f6',
+          icon: 'landmark',
+          color: '#10b981',
           initialBalanceCents: 0,
           includeInTotal: true,
           isDefault: false,
@@ -875,7 +916,7 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
         catName?: string,
         subName?: string
       ): Promise<{ categoryId: string; subcategoryId: string | null }> => {
-        const cleanCat = (catName ?? '').trim() || (kind === 'expense' ? 'Altre Spese' : 'Regali & Altro');
+        const cleanCat = (catName ?? '').trim() || 'Altro';
         let parent = catList.find(
           (c) =>
             c.kind === kind &&
@@ -883,13 +924,14 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
             c.name.toLowerCase() === cleanCat.toLowerCase()
         );
         if (!parent) {
+          const appearance = inferCategoryAppearance(kind, cleanCat);
           parent = {
             id: generateUUID(),
             parentId: null,
             kind,
             name: cleanCat,
-            icon: kind === 'expense' ? 'tag' : 'coins',
-            color: kind === 'expense' ? '#3b82f6' : '#10b981',
+            icon: appearance.icon,
+            color: appearance.color,
             monthlyBudgetCents: null,
             archived: false,
             sortOrder: catList.filter((c) => c.kind === kind && !c.parentId).length,
@@ -898,6 +940,7 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
             updatedAt: now,
           };
           catList.push(parent);
+          catById.set(parent.id, parent);
           await db.categories.put(parent);
           await queueOutbox('categories', parent.id, now);
         }
@@ -929,6 +972,7 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
             updatedAt: now,
           };
           catList.push(sub);
+          catById.set(sub.id, sub);
           await db.categories.put(sub);
           await queueOutbox('categories', sub.id, now);
         }
@@ -936,8 +980,29 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
       };
 
       const createdTxs: Transaction[] = [];
-      for (const r of rows) {
-        if (!r.amountCents || r.amountCents <= 0) continue;
+      let skipped = 0;
+
+      for (let idx = 0; idx < rows.length; idx++) {
+        const r = rows[idx];
+        const roundedCents = Math.round(r.amountCents || 0);
+        if (roundedCents <= 0) continue;
+
+        const cleanCatLower =
+          r.kind === 'transfer'
+            ? ''
+            : ((r.categoryName ?? '').trim() || 'Altro').toLowerCase();
+        const cleanNote = (r.note ?? '').trim();
+        const sig = `${r.kind}|${r.occurredOn}|${roundedCents}|${cleanCatLower}|${cleanNote.toLowerCase()}`;
+
+        if (deduplicate) {
+          const rem = existingCounts.get(sig) ?? 0;
+          if (rem > 0) {
+            existingCounts.set(sig, rem - 1);
+            skipped++;
+            continue;
+          }
+        }
+
         const fromAcc = await findOrCreateAccount(r.accountName);
         let toAccountId: string | null = null;
         let categoryId: string | null = null;
@@ -956,19 +1021,22 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
           subcategoryId = catIds.subcategoryId;
         }
 
+        // Preserve top-to-bottom spreadsheet order within the same day
+        const createdAt = new Date(nowMs - idx * 10).toISOString();
+
         createdTxs.push({
           id: generateUUID(),
           kind: r.kind,
-          amountCents: Math.round(r.amountCents),
+          amountCents: roundedCents,
           accountId: fromAcc.id,
           toAccountId,
           categoryId,
           subcategoryId,
           occurredOn: r.occurredOn,
-          note: (r.note ?? '').trim(),
+          note: cleanNote,
           recurringRuleId: null,
           deletedAt: null,
-          createdAt: now,
+          createdAt,
           updatedAt: now,
         });
       }
@@ -983,14 +1051,21 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
             updatedAt: now,
           }))
         );
+        markUserModified();
+        await reloadFromIndexedDB();
+        scheduleBackgroundSync();
       }
 
-      markUserModified();
-      await reloadFromIndexedDB();
-      scheduleBackgroundSync();
-      return { imported: createdTxs.length };
+      return { imported: createdTxs.length, skipped };
     },
-    [activeAccounts, allCategories, markUserModified, reloadFromIndexedDB, scheduleBackgroundSync]
+    [
+      activeAccounts,
+      allCategories,
+      allTransactions,
+      markUserModified,
+      reloadFromIndexedDB,
+      scheduleBackgroundSync,
+    ]
   );
 
   const exportBackupJSON = useCallback(async () => {

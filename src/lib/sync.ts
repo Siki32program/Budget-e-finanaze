@@ -30,9 +30,9 @@ function accountToRow(a: Account, userId: string) {
 function rowToAccount(r: Record<string, unknown>): Account {
   return {
     id: String(r.id),
-    name: String(r.name ?? 'Conto'),
+    name: String(r.name ?? 'Principale'),
     type: (r.type as Account['type']) || 'bank',
-    icon: String(r.icon ?? 'wallet'),
+    icon: String(r.icon ?? 'landmark'),
     color: String(r.color ?? '#10b981'),
     initialBalanceCents: Number(r.initial_balance_cents ?? 0),
     includeInTotal: Boolean(r.include_in_total ?? true),
@@ -163,6 +163,135 @@ function rowToRecurring(r: Record<string, unknown>): RecurringRule {
   };
 }
 
+// Reconcile local seed accounts/categories with remote ones by name on first device link
+async function alignLocalIdsWithRemote(
+  remoteAccs: Account[],
+  remoteCats: Category[]
+): Promise<void> {
+  const localAccs = await db.accounts.toArray();
+  const localCats = await db.categories.toArray();
+
+  const accRemap = new Map<string, string>();
+  for (const la of localAccs) {
+    if (la.deletedAt) continue;
+    const match = remoteAccs.find(
+      (ra) => !ra.deletedAt && ra.name.trim().toLowerCase() === la.name.trim().toLowerCase()
+    );
+    if (match && match.id !== la.id) {
+      accRemap.set(la.id, match.id);
+    }
+  }
+
+  const catRemap = new Map<string, string>();
+  for (const lc of localCats) {
+    if (lc.deletedAt || lc.parentId !== null) continue;
+    const match = remoteCats.find(
+      (rc) =>
+        !rc.deletedAt &&
+        rc.parentId === null &&
+        rc.kind === lc.kind &&
+        rc.name.trim().toLowerCase() === lc.name.trim().toLowerCase()
+    );
+    if (match && match.id !== lc.id) {
+      catRemap.set(lc.id, match.id);
+    }
+  }
+
+  if (accRemap.size === 0 && catRemap.size === 0) return;
+
+  await db.transaction(
+    'rw',
+    [db.accounts, db.categories, db.transactions, db.recurringRules, db.outbox],
+    async () => {
+      const txs = await db.transactions.toArray();
+      for (const tx of txs) {
+        const nextAcc = accRemap.get(tx.accountId) ?? tx.accountId;
+        const nextToAcc = tx.toAccountId
+          ? accRemap.get(tx.toAccountId) ?? tx.toAccountId
+          : null;
+        const nextCat = tx.categoryId
+          ? catRemap.get(tx.categoryId) ?? tx.categoryId
+          : null;
+        if (
+          nextAcc !== tx.accountId ||
+          nextToAcc !== tx.toAccountId ||
+          nextCat !== tx.categoryId
+        ) {
+          await db.transactions.put({
+            ...tx,
+            accountId: nextAcc,
+            toAccountId: nextToAcc,
+            categoryId: nextCat,
+          });
+        }
+      }
+
+      const recs = await db.recurringRules.toArray();
+      for (const rr of recs) {
+        const nextAcc = accRemap.get(rr.accountId) ?? rr.accountId;
+        const nextToAcc = rr.toAccountId
+          ? accRemap.get(rr.toAccountId) ?? rr.toAccountId
+          : null;
+        const nextCat = rr.categoryId
+          ? catRemap.get(rr.categoryId) ?? rr.categoryId
+          : null;
+        if (
+          nextAcc !== rr.accountId ||
+          nextToAcc !== rr.toAccountId ||
+          nextCat !== rr.categoryId
+        ) {
+          await db.recurringRules.put({
+            ...rr,
+            accountId: nextAcc,
+            toAccountId: nextToAcc,
+            categoryId: nextCat,
+          });
+        }
+      }
+
+      // Repoint child subcategories whose parent was remapped
+      for (const lc of localCats) {
+        if (lc.parentId && catRemap.has(lc.parentId)) {
+          await db.categories.put({
+            ...lc,
+            parentId: catRemap.get(lc.parentId)!,
+          });
+        }
+      }
+
+      // Remove duplicate local seed rows and their outbox entries
+      for (const oldAccId of accRemap.keys()) {
+        await db.accounts.delete(oldAccId);
+        await db.outbox.delete(`accounts:${oldAccId}`);
+      }
+      for (const oldCatId of catRemap.keys()) {
+        await db.categories.delete(oldCatId);
+        await db.outbox.delete(`categories:${oldCatId}`);
+      }
+    }
+  );
+}
+
+async function fetchAllRemoteRows(
+  table: 'accounts' | 'categories' | 'transactions' | 'recurring_rules'
+): Promise<Record<string, unknown>[]> {
+  const pageSize = 1000;
+  const all: Record<string, unknown>[] = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('*')
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    const rows = (data ?? []) as Record<string, unknown>[];
+    all.push(...rows);
+    if (rows.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
 let syncInProgress = false;
 
 export interface SyncOutcome {
@@ -191,6 +320,12 @@ export async function runCloudSync(options?: {
   const userId = session.user.id;
 
   try {
+    // Ensure private 2026 seed is claimed if eligible (safe & idempotent)
+    await supabase.rpc('claim_initial_2026_seed').then(
+      () => undefined,
+      () => undefined
+    );
+
     // Step 1: Check whether cloud already has data vs local untouched seed
     const settings = loadLocalSettings();
     const { count: remoteAccountCount, error: countErr } = await supabase
@@ -202,16 +337,35 @@ export async function runCloudSync(options?: {
     const cloudHasData = (remoteAccountCount ?? 0) > 0;
     const localTxCount = await db.transactions.count();
 
-    if (cloudHasData && !settings.hasUserModifiedData && localTxCount === 0 && !settings.lastSyncedAt) {
+    if (
+      cloudHasData &&
+      !settings.hasUserModifiedData &&
+      localTxCount === 0 &&
+      !settings.lastSyncedAt &&
+      !options?.forceFullPush
+    ) {
       // Fresh device logging into an already-populated cloud account:
-      // Clear local untouched default seed so we don't duplicate accounts/categories!
+      // Clear local untouched default seed so we pull the exact cloud accounts/categories/transactions!
       await db.transaction('rw', [db.accounts, db.categories, db.outbox], async () => {
         await db.accounts.clear();
         await db.categories.clear();
         await db.outbox.clear();
       });
+    } else if (cloudHasData && !settings.lastSyncedAt && !options?.forceFullPush) {
+      // Local device already added data offline before first cloud login:
+      // Align local account/category IDs by name with remote so 'Principale' and categories never duplicate!
+      const [rAcc, rCat] = await Promise.all([
+        supabase.from('accounts').select('*'),
+        supabase.from('categories').select('*'),
+      ]);
+      if (!rAcc.error && !rCat.error) {
+        await alignLocalIdsWithRemote(
+          (rAcc.data ?? []).map(rowToAccount),
+          (rCat.data ?? []).map(rowToCategory)
+        );
+      }
     } else if (!cloudHasData || options?.forceFullPush) {
-      // First-time cloud sync: queue all local records to upload cleanly
+      // First-time cloud sync when cloud is empty (or explicit full push): upload all local records
       const [allAcc, allCat, allTx, allRec] = await Promise.all([
         db.accounts.toArray(),
         db.categories.toArray(),
@@ -232,7 +386,6 @@ export async function runCloudSync(options?: {
         if (error) throw error;
       }
       if (allTx.length > 0) {
-        // Chunk in batches of 500 for large Excel imports
         for (let i = 0; i < allTx.length; i += 500) {
           const chunk = allTx.slice(i, i + 500);
           const { error } = await supabase
@@ -328,45 +481,40 @@ export async function runCloudSync(options?: {
       }
     }
 
-    // Step 3: Pull remote rows and merge via updated_at (Last-Write-Wins)
-    const [accRes, catRes, txRes, recRes] = await Promise.all([
-      supabase.from('accounts').select('*'),
-      supabase.from('categories').select('*'),
-      supabase.from('transactions').select('*'),
-      supabase.from('recurring_rules').select('*'),
+    // Step 3: Pull remote rows (paginated beyond 1,000 rows) and merge via updated_at
+    const [accData, catData, txData, recData] = await Promise.all([
+      fetchAllRemoteRows('accounts'),
+      fetchAllRemoteRows('categories'),
+      fetchAllRemoteRows('transactions'),
+      fetchAllRemoteRows('recurring_rules'),
     ]);
-
-    if (accRes.error) throw accRes.error;
-    if (catRes.error) throw catRes.error;
-    if (txRes.error) throw txRes.error;
-    if (recRes.error) throw recRes.error;
 
     await db.transaction(
       'rw',
       [db.accounts, db.categories, db.transactions, db.recurringRules],
       async () => {
-        for (const raw of accRes.data ?? []) {
+        for (const raw of accData) {
           const remote = rowToAccount(raw);
           const local = await db.accounts.get(remote.id);
           if (!local || remote.updatedAt >= local.updatedAt) {
             await db.accounts.put(remote);
           }
         }
-        for (const raw of catRes.data ?? []) {
+        for (const raw of catData) {
           const remote = rowToCategory(raw);
           const local = await db.categories.get(remote.id);
           if (!local || remote.updatedAt >= local.updatedAt) {
             await db.categories.put(remote);
           }
         }
-        for (const raw of txRes.data ?? []) {
+        for (const raw of txData) {
           const remote = rowToTransaction(raw);
           const local = await db.transactions.get(remote.id);
           if (!local || remote.updatedAt >= local.updatedAt) {
             await db.transactions.put(remote);
           }
         }
-        for (const raw of recRes.data ?? []) {
+        for (const raw of recData) {
           const remote = rowToRecurring(raw);
           const local = await db.recurringRules.get(remote.id);
           if (!local || remote.updatedAt >= local.updatedAt) {

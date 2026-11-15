@@ -34,3 +34,7 @@ android/.idea
 .env
 .env.local
 .env.*.local
+
+# Private downloaded user spreadsheets (never commit personal data)
+google_drive/
+

@@ -29,7 +29,9 @@ export function SettingsView() {
   } = useFinance();
 
   // Cloud Auth Form State
-  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>(() =>
+    settings.lastSyncedAt ? 'signin' : 'signup'
+  );
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authMsg, setAuthMsg] = useState<{
@@ -112,7 +114,7 @@ export function SettingsView() {
               Cloud Privato Supabase (budget-finanze)
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Funziona sempre offline sul telefono e sincronizza automaticamente il database criptato in Europa.
+              Funziona sempre offline sul telefono e sincronizza automaticamente il tuo storico 2026 (&ldquo;Budget e finanze&rdquo;) su Supabase in Europa.
             </p>
           </div>
         </div>

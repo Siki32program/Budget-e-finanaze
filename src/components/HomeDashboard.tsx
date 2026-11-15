@@ -4,6 +4,8 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Cloud,
+  FileSpreadsheet,
   Plus,
   SkipForward,
   X,
@@ -19,6 +21,7 @@ import {
 } from '../lib/format';
 import { DynamicIcon } from '../lib/icons';
 import type {
+  AppView,
   MainFlowTab,
   PeriodMode,
   Transaction,
@@ -42,6 +45,7 @@ interface HomeDashboardProps {
     categoryId?: string;
   }) => void;
   onEditTransaction: (tx: Transaction) => void;
+  onNavigate?: (view: AppView) => void;
 }
 
 interface CategorySummaryItem {
@@ -62,6 +66,7 @@ export function HomeDashboard({
   onChangeFlowTab,
   onOpenNewTransaction,
   onEditTransaction,
+  onNavigate,
 }: HomeDashboardProps) {
   const {
     categories,
@@ -71,6 +76,7 @@ export function HomeDashboard({
     period,
     setPeriod,
     settings,
+    cloudUser,
     dueManualRules,
     applyRecurringRuleNow,
     skipRecurringRuleOnce,
@@ -78,6 +84,7 @@ export function HomeDashboard({
 
   const [selectedSliceId, setSelectedSliceId] = useState<string | null>(null);
   const [drillCategoryId, setDrillCategoryId] = useState<string | null>(null);
+  const [hideSyncBanner, setHideSyncBanner] = useState<boolean>(false);
 
   const bounds = useMemo(() => getPeriodBounds(period), [period]);
 
@@ -256,6 +263,47 @@ export function HomeDashboard({
       </div>
 
       <div className="max-w-lg mx-auto px-4 -mt-4 space-y-3">
+        {/* One-time onboarding banner when local DB has 0 transactions and user hasn't signed in to Cloud yet */}
+        {!cloudUser && transactions.length === 0 && !hideSyncBanner && onNavigate && (
+          <div className="bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-300/70 dark:border-emerald-500/30 rounded-2xl p-3.5 space-y-2.5 shadow-2xs">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-bold text-emerald-900 dark:text-emerald-300">
+                <Cloud className="w-4 h-4 shrink-0 text-emerald-500" />
+                <span>Storico 2026 &ldquo;Budget e finanze&rdquo; pronto nel Cloud</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHideSyncBanner(true)}
+                aria-label="Chiudi avviso"
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+              Connetti il tuo Cloud Privato Supabase per sincronizzare subito tutte le tue operazioni 2026 su Web e Android, oppure importa un file Excel.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onNavigate('settings')}
+                className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition"
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                Sincronizza Cloud
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigate('import_export')}
+                className="py-2 px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 transition"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500" />
+                Excel .xlsx
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Due manual recurring reminders banner */}
         {dueManualRules.length > 0 && (
           <div className="bg-amber-50 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/30 rounded-2xl p-3.5 space-y-2">
