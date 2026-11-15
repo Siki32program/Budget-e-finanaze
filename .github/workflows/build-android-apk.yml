@@ -1,0 +1,65 @@
+name: Build Siki Budget Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - 'arena/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Compila Siki-Budget.apk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout codice
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Installa dipendenze e compila Web App
+        run: |
+          npm ci
+          npm run build
+          npx cap sync android
+
+      - name: Compila APK Android (Siki Budget)
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../Siki-Budget.apk
+
+      - name: Carica APK negli Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Siki-Budget-APK
+          path: Siki-Budget.apk
+          retention-days: 90
+
+      - name: Pubblica APK nella sezione Releases (1-tap download da smartphone)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-apk
+          name: 'Siki Budget - Ultima Versione Android (.APK)'
+          body: |
+            Scarica **`Siki-Budget.apk`** direttamente dal tuo smartphone Android e tocca **Installa** (oppure **Aggiorna** se l'hai già installata).
+          prerelease: false
+          files: Siki-Budget.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
